@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Test artifacts (regenerated per run; don't commit)
+results/*.jsonl
+fixtures/*.png
+fixtures/*.jpg
+fixtures/*.pdf
+fixtures/*.csv
+fixtures/*.txt
+fixtures/*.json
+fixtures/*.py
+fixtures/*.md
+fixtures/*.docx
+fixtures/*.xlsx
+!fixtures/gen_fixtures.py
+
+# OS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
