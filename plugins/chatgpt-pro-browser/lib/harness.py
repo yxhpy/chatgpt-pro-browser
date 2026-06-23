@@ -360,19 +360,38 @@ class ChatGPTSession:
         return text, snap.get("generating", True), snap.get("url", "")
 
     # ---- completion detection ----
-    async def _wait_turn_done(self, timeout: float = 180.0) -> tuple[str, bool]:
+    async def _wait_turn_done(
+        self, timeout: float = 3600.0, *, poll_interval: float = 0.3,
+        heartbeat_interval: float = 30.0, stall_threshold: float = 300.0,
+        on_heartbeat=None,
+    ) -> tuple[str, bool]:
         """Wait for the assistant reply to finish. Returns (markdown, completed).
 
-        Polls cheaply with innerText to detect completion (stop-button gone +
-        text stable), THEN reads the final markdown via the copy button so the
-        returned text preserves headings/code/checkboxes.
+        Heartbeat-style waiting — does NOT give up just because time passed. The
+        only real exit conditions are:
+          - DONE: stop-button gone + text stable (~0.9s) → return (markdown, True)
+          - STALL: stop-button still present but text hasn't changed for
+            `stall_threshold` seconds → suspicious; return (partial, False) so
+            the caller can resume() or investigate. (Pro deep-research can run
+            for hours; a 5-min stall likely means the page hung, not that Pro
+            is still thinking.)
+          - HARD CAP: `timeout` seconds elapsed (default 1h) — absolute safety
+            net against zombies. Caller can raise it for known-long tasks.
 
-        `completed=False` means the budget expired mid-generation. The chat URL
-        is captured on self.current_chat_url regardless, so the caller can
-        resume() later (server keeps generating after disconnect).
+        `timeout` is therefore a *ceiling*, not a budget — short tasks finish
+        in seconds, long tasks run until stall/done, only true zombies hit the
+        cap. Verified assumption: while Pro generates, the stop-button stays
+        visible (gen=True); it flips to gen=False on completion.
+
+        Heartbeat: every `heartbeat_interval` seconds, if `on_heartbeat` is
+        provided it's called with (elapsed, text_len, generating) so callers
+        can log progress / keep a UI alive.
         """
         deadline = time.monotonic() + timeout
+        t0 = time.monotonic()
         last_text, stable = "", 0
+        last_change_at = time.monotonic()
+        last_heartbeat_at = 0.0
         url_captured = False
         while time.monotonic() < deadline:
             snap = await self._page.evaluate(
@@ -387,22 +406,37 @@ class ChatGPTSession:
             if not url_captured and "/c/" in snap.get("url", ""):
                 self.current_chat_url = snap["url"]
                 url_captured = True
+            now = time.monotonic()
             text = snap.get("text", "")
             gen = snap.get("generating", True)
             low = text.strip().lower()
+            # track last content change (for stall detection)
+            if text != last_text:
+                last_change_at = now
+            # heartbeat callback
+            if on_heartbeat and (now - last_heartbeat_at) >= heartbeat_interval:
+                last_heartbeat_at = now
+                try:
+                    on_heartbeat(now - t0, len(text), gen)
+                except Exception:
+                    pass
+            # DONE?
             done = (not gen and text and len(text) >= 2 and low not in PLACEHOLDERS)
             if done and text == last_text:
                 stable += 1
                 if stable >= 3:   # ~0.9s stable via innerText
-                    # generation confirmed done — now fetch markdown source
                     md, _, _ = await self._read_assistant_text()
                     return (md or text), True
             else:
                 stable = 0
+            # STALL? (still generating but no text change for stall_threshold)
+            if gen and (now - last_change_at) >= stall_threshold and len(text) > 0:
+                # likely a page hang, not normal Pro thinking — bail with partial
+                md, _, _ = await self._read_assistant_text()
+                return (md or text), False
             last_text = text
-            await asyncio.sleep(0.3)
-        # timeout — generation still in progress server-side. Capture whatever
-        # markdown we can (partial) + completed=False for resume().
+            await asyncio.sleep(poll_interval)
+        # HARD CAP hit — generation still in progress. Capture partial + resume hint.
         md, _, _ = await self._read_assistant_text()
         return (md or last_text), False
 
@@ -460,36 +494,45 @@ class ChatGPTSession:
     # ---- high-level ----
     async def ask(
         self, prompt: str, *, attachments: Optional[list[str]] = None,
-        input_mode: str = "paste", type_delay: int = 6, timeout: float = 180.0,
+        input_mode: str = "paste", type_delay: int = 6, timeout: float = 3600.0,
+        stall_threshold: float = 300.0, on_heartbeat=None,
     ) -> TurnResult:
         """Send `prompt` (with optional file attachments) and return the reply.
 
-        input_mode (NEW — fixes the Enter-submits-early bug for multi-line
-        prompts):
-          - "paste" (default): bulk-insert via execCommand('insertText').
-            Fast and newline-safe; never submits mid-prompt. Use for big /
-            multi-line prompts (planner output, specs, code).
-          - "keyboard": legacy char-by-char typing. Slower; keep for cases
-            where paste is blocked.
-          - "clipboard": clipboard paste fallback.
+        timeout is now a CEILING (default 1h), not a budget — short tasks finish
+        in seconds; long Pro tasks (deep research / planning, can run minutes to
+        hours) wait until done/stall, only true zombies hit the cap. Raise it
+        for known-multi-hour tasks.
 
-        Submission is now a separate explicit step (send-button click), so the
-        prompt's own newlines can't accidentally trigger send.
+        stall_threshold (default 5min): if the stop-button is still present but
+        text hasn't changed for this long, treat it as a page hang and return
+        partial + completed=False (caller can resume()). Normal Pro thinking
+        streams continuously, so a 5-min freeze is a real anomaly.
+
+        on_heartbeat(elapsed, text_len, generating): optional callback fired
+        every ~30s so callers can log progress / keep a UI alive during long
+        waits.
+
+        input_mode:
+          - "paste" (default): bulk-insert via execCommand('insertText').
+            Newline-safe; never submits mid-prompt.
+          - "keyboard": legacy char-by-char typing.
+          - "clipboard": clipboard paste fallback.
         """
         t0 = time.monotonic()
         await self._focus_composer()
         if attachments:
             await self.upload(*attachments)
             await asyncio.sleep(0.5)
-            # re-focus (upload may have moved focus)
             await self._focus_composer()
         await self._type_to_composer(prompt, mode=input_mode)
         await asyncio.sleep(0.3)
-        # Make sure send is enabled before submitting (also covers no-attachment
-        # case where the composer needs a tick to enable after text input).
         await self._wait_send_enabled(timeout=10.0)
         await self._submit()
-        text, completed = await self._wait_turn_done(timeout=timeout)
+        text, completed = await self._wait_turn_done(
+            timeout=timeout, stall_threshold=stall_threshold,
+            on_heartbeat=on_heartbeat,
+        )
         # If we never captured a /c/ URL in this turn, try once more — the URL
         # assignment can lag the submit by a few seconds.
         if self.current_chat_url is None:
@@ -506,19 +549,23 @@ class ChatGPTSession:
         )
 
     async def resume(
-        self, chat_url: str, *, timeout: float = 300.0, poll_interval: float = 3.0,
+        self, chat_url: str, *, timeout: float = 3600.0, poll_interval: float = 3.0,
+        stall_threshold: float = 300.0, heartbeat_interval: float = 30.0,
+        on_heartbeat=None,
     ) -> TurnResult:
         """Reopen an existing chat and read its latest assistant turn to completion.
 
-        Use this after an ask() returned `completed=False` (timed out mid-gen):
-        ChatGPT keeps generating server-side, so navigating back to the chat URL
-        and polling yields the FULL reply even if the original browser was closed.
+        Use this after an ask() returned `completed=False`: ChatGPT keeps
+        generating server-side, so navigating back to the chat URL and polling
+        yields the FULL reply even if the original browser was closed.
 
         Verified: a 300-word reply that was len=0 in-session returned complete
-        (len=2097) after a disconnect + resume().
+        (len=2097) after a disconnect + resume(). Works in a FRESH session too.
 
-        This also works in a FRESH ChatGPTSession (the chat is identified by URL,
-        not by browser state) — useful when the original process died.
+        Heartbeat-style: timeout is a CEILING (default 1h), not a budget.
+        Exits on DONE (stop gone + stable), STALL (gen=True but no text change
+        for stall_threshold — page hang), or HARD CAP. on_heartbeat fires every
+        ~heartbeat_interval seconds for progress logging.
         """
         t0 = time.monotonic()
         if not chat_url or "/c/" not in chat_url:
@@ -530,10 +577,10 @@ class ChatGPTSession:
         except PWTimeout:
             pass
         await asyncio.sleep(2)
-        # poll with innerText until generation finishes (gen=False) + stable,
-        # THEN fetch markdown source via the copy button.
         deadline = time.monotonic() + timeout
         last_text, stable = "", 0
+        last_change_at = time.monotonic()
+        last_heartbeat_at = 0.0
         while time.monotonic() < deadline:
             snap = await self._page.evaluate(
                 """() => {
@@ -544,8 +591,17 @@ class ChatGPTSession:
                     return {text, generating: !!stop};
                 }"""
             )
+            now = time.monotonic()
             text = snap.get("text", "")
             gen = snap.get("generating", True)
+            if text != last_text:
+                last_change_at = now
+            if on_heartbeat and (now - last_heartbeat_at) >= heartbeat_interval:
+                last_heartbeat_at = now
+                try:
+                    on_heartbeat(now - t0, len(text), gen)
+                except Exception:
+                    pass
             if (not gen) and len(text) >= 2 and text.strip().lower() not in PLACEHOLDERS:
                 if text == last_text:
                     stable += 1
@@ -560,15 +616,24 @@ class ChatGPTSession:
                     stable = 0
             else:
                 stable = 0
+            # STALL: still generating but frozen — page hang, not normal Pro
+            if gen and (now - last_change_at) >= stall_threshold and len(text) > 0:
+                md, _, _ = await self._read_assistant_text()
+                return TurnResult(
+                    text=(md or text), plan=self.plan or "",
+                    elapsed=time.monotonic() - t0,
+                    chat_url=chat_url, completed=False,
+                    error=f"resume stalled: no text change for {stall_threshold:.0f}s while generating",
+                )
             last_text = text
             await asyncio.sleep(poll_interval)
-        # still not done after resume budget — fetch whatever markdown we can
+        # HARD CAP
         md, _, _ = await self._read_assistant_text()
         return TurnResult(
             text=(md or last_text), plan=self.plan or "",
             elapsed=time.monotonic() - t0,
             chat_url=chat_url, completed=False,
-            error="resume timed out — server may still be generating; retry resume()",
+            error=f"resume hit hard cap ({timeout:.0f}s); server may still be generating",
         )
 
     async def new_chat(self) -> None:

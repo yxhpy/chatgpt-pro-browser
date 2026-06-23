@@ -187,16 +187,31 @@ async def generate(
                                          # doesn't require the harness on path
     prompt = build_prompt(plan_type, goal, context_files, REPO_ROOT)
 
+    def _hb(elapsed, tlen, gen):
+        """Heartbeat: log progress every ~30s so the user sees it's alive."""
+        print(f"[heartbeat] {elapsed:.0f}s elapsed, {tlen} chars, generating={gen}",
+              file=sys.stderr)
+
     async def _ask_or_resume(s, prompt_text):
-        """ask(); if it times out mid-gen, resume() the chat URL to completion."""
-        r = await s.ask(prompt_text, input_mode=input_mode, timeout=timeout)
-        # if the budget expired but the server is still generating, resume
+        """ask(); if not completed (stall/hard-cap), keep resuming until done.
+
+        No fixed retry cap — Pro planning can run minutes-to-hours. We only stop
+        resuming when: the turn completes, OR resume returns an error that isn't
+        'still generating' (e.g. page crashed), OR we've resumed 12 times (each
+        resume waits up to `timeout`, so 12 × timeout is a sane absolute ceiling
+        of ~12h — anything beyond that is almost certainly a real failure).
+        """
+        r = await s.ask(prompt_text, input_mode=input_mode, timeout=timeout,
+                        on_heartbeat=_hb)
         attempts = 0
-        while not r.completed and r.chat_url and attempts < 3:
-            print(f"[resume] turn timed out, resuming {r.chat_url} (attempt {attempts+1})",
-                  file=sys.stderr)
-            r = await s.resume(r.chat_url, timeout=timeout)
+        # keep resuming while: not completed AND we have a chat URL AND the last
+        # error looks like "still generating" (not a hard crash)
+        while (not r.completed and r.chat_url and attempts < 12):
             attempts += 1
+            err = (r.error or "")
+            print(f"[resume] not done yet ({err or 'no error'}); "
+                  f"resume attempt {attempts} on {r.chat_url}", file=sys.stderr)
+            r = await s.resume(r.chat_url, timeout=timeout, on_heartbeat=_hb)
         return r
 
     async with ChatGPTSession(headless=headless) as s:
