@@ -41,6 +41,13 @@ UA = (
     "(KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36"
 )
 
+# Daemon lock file: when a persistent Chrome is running (daemon mode), this
+# records its CDP endpoint so other scripts can connect_over_cdp() to it
+# instead of launching (and later closing) their own browser. Reuse = seconds
+# instead of ~15s cold start per call.
+LOCK_FILE = os.path.expanduser("~/.chatgpt-pro-browser.lock")
+DEFAULT_CDP_PORT = 9223   # avoid 9222 (Playwright bundled chromium default)
+
 # Placeholders that appear during generation and must NOT be treated as final.
 PLACEHOLDERS = {
     "thinking…", "thinking...", "generating…", "generating...",
@@ -123,6 +130,66 @@ class TurnResult:
     completed: bool = True
 
 
+# --------------------------------------------------------------------------- #
+# Daemon / lock-file management
+# --------------------------------------------------------------------------- #
+def write_lock(cdp_url: str, pid: int) -> None:
+    """Record the running daemon's CDP endpoint + pid so other scripts connect."""
+    import json
+    data = {"cdp_url": cdp_url, "pid": pid,
+            "started_at": time.time()}
+    with open(LOCK_FILE, "w") as f:
+        json.dump(data, f)
+
+
+def read_lock() -> Optional[dict]:
+    """Return the lock dict if a daemon appears alive, else None (and clean up)."""
+    import json
+    if not os.path.exists(LOCK_FILE):
+        return None
+    try:
+        with open(LOCK_FILE) as f:
+            d = json.load(f)
+    except Exception:
+        _clear_lock()
+        return None
+    # is the daemon process still alive?
+    pid = d.get("pid")
+    if pid:
+        try:
+            os.kill(pid, 0)   # signal 0 = existence check
+        except (OSError, ProcessLookupError):
+            _clear_lock()
+            return None
+    return d
+
+
+def _clear_lock() -> None:
+    try:
+        os.remove(LOCK_FILE)
+    except FileNotFoundError:
+        pass
+
+
+def clear_lock() -> None:
+    """Public: remove the lock file (called by close.py after shutting down)."""
+    _clear_lock()
+
+
+async def daemon_alive() -> bool:
+    """True if a connectable daemon is running."""
+    d = read_lock()
+    if not d:
+        return False
+    # verify the CDP endpoint actually responds
+    try:
+        import urllib.request
+        with urllib.request.urlopen(d["cdp_url"] + "/json/version", timeout=2) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
 class ChatGPTSession:
     """Drives a logged-in ChatGPT Pro session.
 
@@ -135,9 +202,22 @@ class ChatGPTSession:
 
     BASE = "https://chatgpt.com/"
 
-    def __init__(self, headless: bool = False, viewport=(1280, 800)):
+    def __init__(self, headless: bool = False, viewport=(1280, 800),
+                 connect_mode: str = "auto"):
+        """connect_mode:
+          - "auto" (default): reuse a running daemon if one exists (read_lock),
+            else launch a fresh browser. Best for submit/status/save scripts —
+            they're fast when a daemon is up, self-sufficient when not.
+          - "launch": always launch a new browser (ignore any daemon).
+          - "connect": require a running daemon; error if none. Used by chat.py.
+          - "daemon": launch AND keep alive after the context exits (don't close
+            the browser in __aexit__) — used by daemon.py. Caller must close()
+            explicitly later.
+        """
         self.headless = headless
         self.viewport = viewport
+        self.connect_mode = connect_mode
+        self._owns_browser = True   # False when connected to a daemon we don't own
         self._pw = None
         self._browser = None
         self._ctx: Optional[BrowserContext] = None
@@ -158,17 +238,48 @@ class ChatGPTSession:
             raise RuntimeError(
                 f"missing auth cookies (have {sorted(names)[:8]}...) — re-login in Chrome"
             )
+
+        # decide: connect to a running daemon, or launch fresh?
+        lock = read_lock() if self.connect_mode in ("auto", "connect") else None
+        if self.connect_mode == "connect" and not lock:
+            raise RuntimeError(
+                "no running daemon (connect_mode='connect'). Start one with "
+                "daemon.py first.")
+        if lock and self.connect_mode in ("auto", "connect"):
+            # REUSE the persistent browser — seconds, not ~15s cold start.
+            try:
+                self._browser = await self._pw.chromium.connect_over_cdp(
+                    lock["cdp_url"], timeout=5000)
+                self._owns_browser = False
+                # use the daemon's existing default context (cookies already
+                # injected when the daemon started). Pick its first page or
+                # make one.
+                contexts = self._browser.contexts
+                self._ctx = contexts[0] if contexts else await self._browser.new_context()
+                pages = self._ctx.pages
+                self._page = pages[0] if pages else await self._ctx.new_page()
+                # navigate to base if not already there
+                if "chatgpt.com" not in (self._page.url or ""):
+                    await self._page.goto(self.BASE, wait_until="domcontentloaded",
+                                          timeout=60000)
+                    await asyncio.sleep(1)
+                return self
+            except Exception as e:
+                # daemon lock stale or unreachable — fall through to launch
+                _clear_lock()
+
+        # LAUNCH fresh (also the fallback when a stale lock was cleared)
+        launch_args = ["--disable-blink-features=AutomationControlled",
+                       "--no-default-browser-check", "--no-first-run"]
+        if self.connect_mode == "daemon":
+            # persistent daemon: open a CDP port so other scripts can connect
+            launch_args.append(f"--remote-debugging-port={DEFAULT_CDP_PORT}")
         self._browser = await self._pw.chromium.launch(
-            channel="chrome", headless=self.headless,
-            args=["--disable-blink-features=AutomationControlled",
-                  "--no-default-browser-check", "--no-first-run"],
+            channel="chrome", headless=self.headless, args=launch_args,
         )
         self._ctx = await self._browser.new_context(
             viewport={"width": self.viewport[0], "height": self.viewport[1]},
             user_agent=UA,
-            # clipboard perms so _read_assistant_text() can read the copy
-            # button's output (the only reliable way to get markdown source —
-            # innerText strips # headings and **bold** markers).
             permissions=["clipboard-read", "clipboard-write"],
         )
         await self._ctx.add_cookies(cookies)
@@ -179,9 +290,27 @@ class ChatGPTSession:
         except PWTimeout:
             pass
         await asyncio.sleep(3)
+        # if daemon mode, record the lock so others can connect
+        if self.connect_mode == "daemon":
+            cdp_url = f"http://127.0.0.1:{DEFAULT_CDP_PORT}"
+            write_lock(cdp_url, os.getpid())
         return self
 
     async def __aexit__(self, *exc):
+        # daemon mode: keep the browser alive — don't close. Caller shuts it
+        # down explicitly via close() / close.py.
+        if self.connect_mode == "daemon":
+            return
+        # connected-to-daemon mode: detach, don't kill the shared browser
+        if not self._owns_browser:
+            # just disconnect our playwright client; daemon browser stays up
+            try:
+                if self._pw:
+                    await self._pw.stop()
+            except Exception:
+                pass
+            self._pw = None
+            return
         try:
             if self._ctx:
                 await self._ctx.close()
@@ -191,6 +320,23 @@ class ChatGPTSession:
                 await self._pw.stop()
         except Exception:
             pass
+
+    async def close(self) -> None:
+        """Explicitly shut down a daemon-mode browser + clear the lock.
+
+        Called by close.py. For non-daemon sessions this is a no-op (the
+        context manager already closed everything).
+        """
+        try:
+            if self._ctx:
+                await self._ctx.close()
+            if self._browser:
+                await self._browser.close()
+            if self._pw:
+                await self._pw.stop()
+        except Exception:
+            pass
+        clear_lock()
 
     # ---- auth ----
     async def current_plan(self) -> str:
