@@ -5,7 +5,7 @@
       "name": "chatgpt-pro-browser",
       "source": {
         "source": "local",
-        "path": "."
+        "path": "./"
       },
       "policy": {
         "installation": "AVAILABLE",
