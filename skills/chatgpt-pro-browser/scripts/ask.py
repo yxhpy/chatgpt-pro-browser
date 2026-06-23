@@ -34,6 +34,10 @@ async def main():
                     help="max seconds to wait (default 180)")
     ap.add_argument("--new-chat", action="store_true", default=True,
                     help="start a fresh chat (default; isolated)")
+    ap.add_argument("--input-mode", choices=("paste", "keyboard", "clipboard"),
+                    default="paste",
+                    help="how to fill the composer (default: paste — safe for "
+                         "multi-line/large prompts; 'keyboard' is legacy typing)")
     args = ap.parse_args()
 
     async with ChatGPTSession(headless=args.headless) as s:
@@ -45,7 +49,7 @@ async def main():
         if args.new_chat:
             await s.new_chat()
         r = await s.ask(args.prompt, attachments=args.file or None,
-                        timeout=args.timeout)
+                        input_mode=args.input_mode, timeout=args.timeout)
         print(r.text)
 
 

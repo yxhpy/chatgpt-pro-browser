@@ -25,3 +25,6 @@ fixtures/*.xlsx
 # IDE
 .vscode/
 .idea/
+
+# Generated plans (planner output; regenerated per run)
+docs/superpowers/plans/*.md

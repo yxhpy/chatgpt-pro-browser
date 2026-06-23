@@ -1,0 +1,19 @@
+{
+  "name": "chatgpt-pro-browser",
+  "version": "0.3.0",
+  "description": "Use your logged-in ChatGPT (incl. Pro) from the terminal by driving the real Chrome browser. Two skills: chatgpt-pro-browser (call Pro / files / multi-turn) and chatgpt-pro-planner (executable plans via Pro).",
+  "author": { "name": "yxhpy" },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "ChatGPT Pro (Browser + Planner)",
+    "shortDescription": "Drive your logged-in ChatGPT Pro; generate executable plans.",
+    "developerName": "yxhpy",
+    "category": "Productivity",
+    "capabilities": ["ChatGPT", "Pro", "Planning", "BrowserAutomation", "FileUploads"],
+    "defaultPrompt": [
+      "用我的 ChatGPT Pro 做个开发计划",
+      "ask chatgpt pro a question",
+      "plan a refactor with chatgpt pro"
+    ]
+  }
+}

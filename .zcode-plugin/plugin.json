@@ -1,0 +1,24 @@
+{
+  "name": "chatgpt-pro-browser",
+  "version": "0.3.0",
+  "description": "Use your logged-in ChatGPT (incl. Pro) from the terminal by driving the real Chrome browser. Ships two skills: chatgpt-pro-browser (call Pro / upload files / multi-turn) and chatgpt-pro-planner (generate executable dev/test/refactor/bugfix plans via Pro, in superpowers markdown format for any agent CLI).",
+  "author": { "name": "yxhpy" },
+  "license": "MIT",
+  "homepage": "https://github.com/yxhpy/chatgpt-pro-browser",
+  "repository": "https://github.com/yxhpy/chatgpt-pro-browser",
+  "keywords": ["chatgpt", "chatgpt-pro", "gpt-5", "planning", "playwright", "automation", "macos"],
+  "skills": "skills",
+  "interface": {
+    "displayName": "ChatGPT Pro (Browser + Planner)",
+    "shortDescription": "Drive your logged-in ChatGPT Pro from the terminal; generate executable plans.",
+    "longDescription": "Decrypt Chrome cookies, inject into a real Chrome, and operate chatgpt.com. Includes a planner skill that produces dev/test/refactor/bugfix plans in the superpowers markdown format any agent CLI can execute.",
+    "developerName": "yxhpy",
+    "category": "Productivity",
+    "capabilities": ["ChatGPT", "Pro", "Planning", "BrowserAutomation", "FileUploads"],
+    "defaultPrompt": [
+      "用我的 ChatGPT Pro 做个开发计划",
+      "ask chatgpt pro a question",
+      "plan a refactor with chatgpt pro"
+    ]
+  }
+}

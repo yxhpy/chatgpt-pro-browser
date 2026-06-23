@@ -13,10 +13,9 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SKILL_NAME="chatgpt-pro-browser"
-SRC_SKILL="$REPO_ROOT/skills/$SKILL_NAME"
+# Both skills shipped by this plugin:
+SKILL_NAMES=("chatgpt-pro-browser" "chatgpt-pro-planner")
 DEST_ROOT="${HOME}/.agents/skills"
-DEST_SKILL="$DEST_ROOT/$SKILL_NAME"
 MODE="symlink"
 
 while [[ $# -gt 0 ]]; do
@@ -35,12 +34,12 @@ done
 echo "=== chatgpt-pro-browser installer ==="
 echo "repo:   $REPO_ROOT"
 echo "mode:   $MODE"
-echo "target: $DEST_SKILL"
+echo "targets: ${SKILL_NAMES[*]}"
 echo
 
 # 1. Prerequisite check (informational; don't abort so --copy still works)
 echo "--- [1/4] prerequisites ---"
-if bash "$SRC_SKILL/scripts/prereq_check.sh"; then
+if bash "$REPO_ROOT/skills/chatgpt-pro-browser/scripts/prereq_check.sh"; then
   :
 else
   echo "[warn] prerequisite check reported failures — see above."
@@ -67,29 +66,38 @@ python3 -m playwright install chromium 2>/dev/null || {
 }
 echo
 
-# 4. Install the skill
-echo "--- [4/4] install skill ---"
+# 4. Install the skills
+echo "--- [4/4] install skills ---"
 mkdir -p "$DEST_ROOT"
-if [[ -e "$DEST_SKILL" || -L "$DEST_SKILL" ]]; then
-  echo "[info] removing existing $DEST_SKILL"
-  rm -rf "$DEST_SKILL"
-fi
-if [[ "$MODE" == "symlink" ]]; then
-  ln -s "$SRC_SKILL" "$DEST_SKILL"
-  echo "symlinked: $DEST_SKILL -> $SRC_SKILL"
-else
-  cp -R "$SRC_SKILL" "$DEST_SKILL"
-  echo "copied: $SRC_SKILL -> $DEST_SKILL"
-fi
+for SKILL_NAME in "${SKILL_NAMES[@]}"; do
+  SRC_SKILL="$REPO_ROOT/skills/$SKILL_NAME"
+  DEST_SKILL="$DEST_ROOT/$SKILL_NAME"
+  if [[ -e "$DEST_SKILL" || -L "$DEST_SKILL" ]]; then
+    echo "[info] removing existing $DEST_SKILL"
+    rm -rf "$DEST_SKILL"
+  fi
+  if [[ "$MODE" == "symlink" ]]; then
+    ln -s "$SRC_SKILL" "$DEST_SKILL"
+    echo "symlinked: $DEST_SKILL -> $SRC_SKILL"
+  else
+    cp -R "$SRC_SKILL" "$DEST_SKILL"
+    echo "copied: $SRC_SKILL -> $DEST_SKILL"
+  fi
+done
 echo
 
 echo "=== done ==="
 echo
-echo "The skill is now discoverable by ZCode. Verify:"
-echo "  ls -la $DEST_SKILL/SKILL.md"
+echo "Both skills are now discoverable by ZCode. Verify:"
+echo "  ls -la $DEST_ROOT/chatgpt-pro-browser/SKILL.md"
+echo "  ls -la $DEST_ROOT/chatgpt-pro-planner/SKILL.md"
 echo
-echo "Quick test (sends one prompt to your ChatGPT Pro):"
-echo "  python3 $REPO_ROOT/skills/$SKILL_NAME/scripts/ask.py 'hello, which model are you?'"
+echo "Quick tests:"
+echo "  # call ChatGPT Pro:"
+echo "  python3 $REPO_ROOT/skills/chatgpt-pro-browser/scripts/ask.py 'hello, which model are you?'"
+echo "  # generate an executable dev plan via Pro:"
+echo "  python3 $REPO_ROOT/skills/chatgpt-pro-planner/scripts/plan.py dev 'your goal here' --context README.md"
 echo
-echo "Run the full test suite (20 tests, uses your Pro quota):"
-echo "  cd $REPO_ROOT && python3 run_suite.py --only single"
+echo "As a plugin (zcode/codex): this repo ships .zcode-plugin/plugin.json and"
+echo "  .codex-plugin/plugin.json — use your CLI's plugin-add command against"
+echo "  https://github.com/yxhpy/chatgpt-pro-browser"
