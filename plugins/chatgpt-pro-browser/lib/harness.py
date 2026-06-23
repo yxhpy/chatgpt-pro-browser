@@ -492,6 +492,91 @@ class ChatGPTSession:
         return
 
     # ---- high-level ----
+    async def submit(
+        self, prompt: str, *, attachments: Optional[list[str]] = None,
+        input_mode: str = "paste", url_timeout: float = 30.0,
+    ) -> str:
+        """Submit `prompt` and return the chat URL as soon as it's assigned.
+
+        This is the FIRE-AND-FORGET entry: it types, uploads, submits, waits
+        ONLY for the /c/<id> URL to appear (~4s after submit), then returns.
+        It does NOT wait for generation to finish — the server keeps generating
+        after this call returns (and after the browser closes).
+
+        Use this for long tasks: submit() to get the URL, then poll status()
+        / save() / resume() from any process at your own pace.
+
+        Returns the chat URL (https://chatgpt.com/c/<uuid>). Raises
+        RuntimeError if the URL doesn't appear within url_timeout (submit may
+        have failed — check that the composer had content + send was enabled).
+        """
+        await self._focus_composer()
+        if attachments:
+            await self.upload(*attachments)
+            await asyncio.sleep(0.5)
+            await self._focus_composer()
+        await self._type_to_composer(prompt, mode=input_mode)
+        await asyncio.sleep(0.3)
+        await self._wait_send_enabled(timeout=10.0)
+        await self._submit()
+        # wait for the /c/<id> URL to be assigned by ChatGPT's router
+        deadline = time.monotonic() + url_timeout
+        while time.monotonic() < deadline:
+            url = await self._page.evaluate("() => location.href")
+            if "/c/" in url:
+                self.current_chat_url = url
+                return url
+            await asyncio.sleep(0.5)
+        raise RuntimeError(
+            f"chat URL did not appear within {url_timeout}s — submit may have failed"
+        )
+
+    async def status(self, chat_url: str) -> dict:
+        """One-shot read of a chat's current state. Returns:
+            {state: 'GENERATING'|'DONE'|'EMPTY'|'STALLED',
+             chars: int, generating: bool, head: str}
+
+        Opens the chat, reads once, returns immediately. Safe to call
+        repeatedly; safe to call from a different process than the submitter.
+        """
+        if not chat_url or "/c/" not in chat_url:
+            raise ValueError(f"status() needs a /c/<id> chat URL, got {chat_url!r}")
+        await self._page.goto(chat_url, wait_until="domcontentloaded", timeout=60000)
+        # Reopened chats lazy-load the turn; poll briefly (up to 12s) for the
+        # assistant element to render text before declaring state. Verified:
+        # text appears ~5s post-goto on a completed chat; a single read after
+        # networkidle can race and see EMPTY.
+        snap = {}
+        for _ in range(24):
+            snap = await self._page.evaluate(
+                """() => {
+                    const a = [...document.querySelectorAll('[data-message-author-role="assistant"]')];
+                    const text = a.length ? a[a.length-1].innerText : '';
+                    const stop = document.querySelector(
+                        '[data-testid="stop-button"], [aria-label*="Stop" i], [aria-label*="停止"]');
+                    return {chars: text.length, head: text.slice(0,120),
+                            generating: !!stop, hasTurn: a.length > 0};
+                }"""
+            )
+            # once we have a turn with real text OR clear generating state, done
+            if snap["hasTurn"] and (snap["chars"] >= 2 or snap["generating"]):
+                break
+            await asyncio.sleep(0.5)
+        if not snap:
+            snap = {"chars": 0, "head": "", "generating": False, "hasTurn": False}
+        if not snap["hasTurn"]:
+            state = "EMPTY"
+        elif snap["generating"]:
+            # generating=True wins over low char count — Pro shows "thinking…"
+            # placeholders with little innerText before the real text streams.
+            state = "GENERATING"
+        elif snap["chars"] < 2:
+            state = "EMPTY"
+        else:
+            state = "DONE"
+        snap["state"] = state
+        return snap
+
     async def ask(
         self, prompt: str, *, attachments: Optional[list[str]] = None,
         input_mode: str = "paste", type_delay: int = 6, timeout: float = 3600.0,
@@ -576,7 +661,22 @@ class ChatGPTSession:
             await self._page.wait_for_load_state("networkidle", timeout=25000)
         except PWTimeout:
             pass
-        await asyncio.sleep(2)
+        # Reopened chats lazy-load the turn — wait for it to render before
+        # polling for completion (otherwise we may see empty text + gen=False
+        # and falsely conclude DONE/EMPTY). Give it up to 15s.
+        for _ in range(30):
+            prep = await self._page.evaluate(
+                """() => {
+                    const a = [...document.querySelectorAll('[data-message-author-role="assistant"]')];
+                    const text = a.length ? a[a.length-1].innerText : '';
+                    const stop = document.querySelector(
+                        '[data-testid="stop-button"], [aria-label*="Stop" i], [aria-label*="停止"]');
+                    return {hasTurn: a.length > 0, len: text.length, gen: !!stop};
+                }"""
+            )
+            if prep["hasTurn"] and (prep["len"] >= 2 or prep["gen"]):
+                break
+            await asyncio.sleep(0.5)
         deadline = time.monotonic() + timeout
         last_text, stable = "", 0
         last_change_at = time.monotonic()
