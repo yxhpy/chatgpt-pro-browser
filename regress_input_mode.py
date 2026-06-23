@@ -8,7 +8,7 @@ Verifies:
   R4. input_mode="keyboard" still works (legacy path not broken).
 """
 import asyncio, sys, re
-sys.path.insert(0, "/Users/yxhpy/ZCodeProject/chatgpt-pro-browser/lib")
+sys.path.insert(0, "/Users/yxhpy/ZCodeProject/chatgpt-pro-browser/plugins/chatgpt-pro-browser/lib")
 from harness import ChatGPTSession
 
 # A multi-line prompt with a sentinel per line + a fenced code block. If the

@@ -25,7 +25,9 @@ from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
-sys.path.insert(0, str(ROOT))
+PLUGIN_ROOT = ROOT / "plugins" / "chatgpt-pro-browser"
+sys.path.insert(0, str(PLUGIN_ROOT))   # for lib.harness
+sys.path.insert(0, str(ROOT))          # for fixtures.gen_fixtures
 from lib.harness import ChatGPTSession       # noqa: E402
 from fixtures.gen_fixtures import make_all    # noqa: E402
 

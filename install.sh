@@ -39,7 +39,7 @@ echo
 
 # 1. Prerequisite check (informational; don't abort so --copy still works)
 echo "--- [1/4] prerequisites ---"
-if bash "$REPO_ROOT/skills/chatgpt-pro-browser/scripts/prereq_check.sh"; then
+if bash "$REPO_ROOT/plugins/chatgpt-pro-browser/skills/chatgpt-pro-browser/scripts/prereq_check.sh"; then
   :
 else
   echo "[warn] prerequisite check reported failures — see above."
@@ -70,7 +70,7 @@ echo
 echo "--- [4/4] install skills ---"
 mkdir -p "$DEST_ROOT"
 for SKILL_NAME in "${SKILL_NAMES[@]}"; do
-  SRC_SKILL="$REPO_ROOT/skills/$SKILL_NAME"
+  SRC_SKILL="$REPO_ROOT/plugins/chatgpt-pro-browser/skills/$SKILL_NAME"
   DEST_SKILL="$DEST_ROOT/$SKILL_NAME"
   if [[ -e "$DEST_SKILL" || -L "$DEST_SKILL" ]]; then
     echo "[info] removing existing $DEST_SKILL"
@@ -94,9 +94,9 @@ echo "  ls -la $DEST_ROOT/chatgpt-pro-planner/SKILL.md"
 echo
 echo "Quick tests:"
 echo "  # call ChatGPT Pro:"
-echo "  python3 $REPO_ROOT/skills/chatgpt-pro-browser/scripts/ask.py 'hello, which model are you?'"
+echo "  python3 $REPO_ROOT/plugins/chatgpt-pro-browser/skills/chatgpt-pro-browser/scripts/ask.py 'hello, which model are you?'"
 echo "  # generate an executable dev plan via Pro:"
-echo "  python3 $REPO_ROOT/skills/chatgpt-pro-planner/scripts/plan.py dev 'your goal here' --context README.md"
+echo "  python3 $REPO_ROOT/plugins/chatgpt-pro-browser/skills/chatgpt-pro-planner/scripts/plan.py dev 'your goal here' --context README.md"
 echo
 echo "As a plugin (zcode/codex): this repo ships .zcode-plugin/plugin.json and"
 echo "  .codex-plugin/plugin.json — use your CLI's plugin-add command against"

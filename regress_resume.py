@@ -7,7 +7,7 @@ complete reply (no truncation, no duplication). Proves resume() is safe to
 call even when the turn already finished.
 """
 import asyncio, sys
-sys.path.insert(0, "/Users/yxhpy/ZCodeProject/chatgpt-pro-browser/lib")
+sys.path.insert(0, "/Users/yxhpy/ZCodeProject/chatgpt-pro-browser/plugins/chatgpt-pro-browser/lib")
 from harness import ChatGPTSession
 
 async def main():
