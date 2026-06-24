@@ -35,9 +35,7 @@ from pathlib import Path
 # Resolve paths: this script is at skills/chatgpt-pro-planner/scripts/plan.py
 SCRIPT_DIR = Path(__file__).resolve().parent          # .../scripts
 SKILL_DIR = SCRIPT_DIR.parent                          # .../chatgpt-pro-planner
-REPO_ROOT = SKILL_DIR.parent.parent                    # repo root
-LIB_DIR = REPO_ROOT / "lib"
-sys.path.insert(0, str(LIB_DIR))
+REPO_ROOT = SKILL_DIR.parent.parent                    # plugin root (lib/ lives here)
 
 PLAN_TYPES = ("dev", "test", "refactor", "bugfix")
 REFS_DIR = SKILL_DIR / "references"
@@ -175,64 +173,71 @@ async def generate(
     refine: bool = True,
     require_pro: bool = True,
     headless: bool = False,
-    timeout: float = 300.0,
-    input_mode: str = "paste",
+    timeout: float = 600.0,
 ) -> tuple[str, Path]:
     """Run the full pipeline. Returns (final_plan_text, saved_path).
 
-    input_mode defaults to "paste" — plan prompts are large/multi-line (role
-    prefix + output contract + goal + context), and paste-mode avoids the
-    Enter-submits-early problem that char-by-char typing hits on newlines.
-
-    Resume-safe: if a turn times out mid-generation (Pro plans are slow), we
-    call resume() on the chat URL instead of giving up. ChatGPT keeps
-    generating server-side, so we always get the full reply.
+    Dependency model: the planner OWNS the planning knowledge (templates,
+    output contract, prompt assembly) and NOTHING else. It does not import the
+    browser harness, open a browser, or know how Pro is reached. It hands the
+    assembled prompt to the BROWSER skill's `ask.py` (its supported CLI) via
+    subprocess, and treats the returned text as opaque. Two skills, one job
+    each — process-isolated, no shared Python state.
     """
-    from harness import ChatGPTSession  # imported lazily so import of this module
-                                         # doesn't require the harness on path
+    import subprocess
+
     prompt = build_prompt(plan_type, goal, context_files, REPO_ROOT)
+    text = await _ask_via_browser_skill(prompt, headless, require_pro, timeout)
 
-    def _hb(elapsed, tlen, gen):
-        """Heartbeat: log progress every ~30s so the user sees it's alive."""
-        print(f"[heartbeat] {elapsed:.0f}s elapsed, {tlen} chars, generating={gen}",
-              file=sys.stderr)
-
-    async def _ask_or_resume(s, prompt_text):
-        """ask(); if not completed (stall/hard-cap), keep resuming until done.
-
-        No fixed retry cap — Pro planning can run minutes-to-hours. We only stop
-        resuming when: the turn completes, OR resume returns an error that isn't
-        'still generating' (e.g. page crashed), OR we've resumed 12 times (each
-        resume waits up to `timeout`, so 12 × timeout is a sane absolute ceiling
-        of ~12h — anything beyond that is almost certainly a real failure).
-        """
-        r = await s.ask(prompt_text, input_mode=input_mode, timeout=timeout,
-                        on_heartbeat=_hb)
-        attempts = 0
-        # keep resuming while: not completed AND we have a chat URL AND the last
-        # error looks like "still generating" (not a hard crash)
-        while (not r.completed and r.chat_url and attempts < 12):
-            attempts += 1
-            err = (r.error or "")
-            print(f"[resume] not done yet ({err or 'no error'}); "
-                  f"resume attempt {attempts} on {r.chat_url}", file=sys.stderr)
-            r = await s.resume(r.chat_url, timeout=timeout, on_heartbeat=_hb)
-        return r
-
-    async with ChatGPTSession(headless=headless) as s:
-        if require_pro:
-            await s.ensure_pro()
-        await s.new_chat()
-        r1 = await _ask_or_resume(s, prompt)
-        text = r1.text
-        if refine:
-            cue = build_refinement_cue(plan_type, REPO_ROOT)
-            r2 = await _ask_or_resume(s, cue)
-            # prefer the refined version, but keep r1 if r2 looks empty/broken
-            if r2.text and len(r2.text) > len(text) * 0.5:
-                text = r2.text
+    if refine:
+        cue = build_refinement_cue(plan_type, REPO_ROOT)
+        refined = await _ask_via_browser_skill(cue, headless, require_pro, timeout)
+        # prefer the refined version, but keep round 1 if round 2 looks broken
+        if refined and len(refined) > len(text) * 0.5:
+            text = refined
     path = save_plan(text, goal, plan_type, REPO_ROOT, out_path)
     return text, path
+
+
+async def _ask_via_browser_skill(
+    prompt: str, headless: bool, require_pro: bool, timeout: float,
+) -> str:
+    """Call the browser skill's ask.py as a subprocess; return its stdout.
+
+    This is the SOLE point of contact between the two skills. If ask.py's CLI
+    contract changes (args/output), only this function needs updating. The
+    browser skill handles: browser lifecycle, Pro verification, downgrade
+    guard, paste-mode input, resume loop, heartbeat logging. Planner sees none
+    of that — just the final reply text.
+    """
+    import subprocess
+    # the browser skill lives next door: skills/chatgpt-pro-browser/scripts/ask.py
+    BROWSER_ASK = (SCRIPT_DIR.parent.parent / "chatgpt-pro-browser" / "scripts"
+                   / "ask.py")
+    if not BROWSER_ASK.exists():
+        raise FileNotFoundError(
+            f"browser skill ask.py not found at {BROWSER_ASK} — install the "
+            f"chatgpt-pro-browser plugin/skill first")
+    cmd = [sys.executable, str(BROWSER_ASK), prompt,
+           "--input-mode", "paste", "--timeout", str(timeout)]
+    if headless:
+        cmd.append("--headless")
+    if not require_pro:
+        cmd.append("--no-pro")
+    # heartbeat: ask.py prints [resume]/[warn] to stderr; surface it live
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    stdout_b, stderr_b = await proc.communicate()
+    if proc.returncode != 0:
+        sys.stderr.write(stderr_b.decode("utf-8", "replace"))
+        raise RuntimeError(
+            f"ask.py exited {proc.returncode} — see stderr above")
+    # surface any [resume]/[warn] progress lines from the browser skill
+    err = stderr_b.decode("utf-8", "replace")
+    for line in err.splitlines():
+        if line.startswith("[resume]") or line.startswith("[warn]"):
+            print(line, file=sys.stderr)
+    return stdout_b.decode("utf-8", "replace").rstrip("\n")
 
 
 def main() -> int:
@@ -250,10 +255,6 @@ def main() -> int:
     ap.add_argument("--no-pro", action="store_true", help="don't require Pro plan")
     ap.add_argument("--headless", action="store_true")
     ap.add_argument("--timeout", type=float, default=600.0)
-    ap.add_argument("--input-mode", choices=("paste", "keyboard", "clipboard"),
-                    default="paste",
-                    help="composer fill mode (default paste — safe for large "
-                         "multi-line plan prompts)")
     ap.add_argument("--print", action="store_true", help="also print plan to stdout")
     args = ap.parse_args()
 
@@ -266,7 +267,6 @@ def main() -> int:
         require_pro=not args.no_pro,
         headless=args.headless,
         timeout=args.timeout,
-        input_mode=args.input_mode,
     ))
     print(f"[saved] {path}", file=sys.stderr)
     if args.print:

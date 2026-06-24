@@ -31,7 +31,7 @@ async def main():
                     help="don't require the Pro plan (allow Plus/Free)")
     ap.add_argument("--headless", action="store_true", help="run headless")
     ap.add_argument("--timeout", type=float, default=600.0,
-                    help="max seconds to wait (default 180)")
+                    help="max seconds to wait per turn (default 600s = 10 min)")
     ap.add_argument("--new-chat", action="store_true", default=True,
                     help="start a fresh chat (default; isolated)")
     ap.add_argument("--input-mode", choices=("paste", "keyboard", "clipboard"),
@@ -50,6 +50,19 @@ async def main():
             await s.new_chat()
         r = await s.ask(args.prompt, attachments=args.file or None,
                         input_mode=args.input_mode, timeout=args.timeout)
+        # Resume loop: if the turn stalled / hit the ceiling (long tasks), reopen
+        # the chat URL and keep reading — server keeps generating after a stall.
+        # This lives in the browser skill so EVERY ask.py caller gets it for
+        # free (planner, chat.py, direct CLI users).
+        attempts = 0
+        while not r.completed and r.chat_url and attempts < 12:
+            attempts += 1
+            print(f"[resume] not done yet ({r.error or 'stalled'}); "
+                  f"attempt {attempts} on {r.chat_url}", file=sys.stderr)
+            r = await s.resume(r.chat_url, timeout=args.timeout)
+        if not r.completed:
+            print(f"[warn] did not complete after {attempts} resumes; "
+                  f"partial saved. chat_url={r.chat_url}", file=sys.stderr)
         print(r.text)
 
 
