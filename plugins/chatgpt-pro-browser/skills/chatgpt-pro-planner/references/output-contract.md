@@ -93,7 +93,8 @@ git commit -m "feat: add specific feature"
 - **Each step is ONE action (2-5 minutes).** "Write the failing test", "run it to confirm it fails", "implement", "run to confirm pass", "commit" are FIVE separate steps, never one.
 - **Every code-changing step shows complete code** in a fenced block — never a description like "add the validation logic".
 - **Every verification step has `Run:` (exact command) + `Expected:` (exact output).**
-- **Checkbox syntax is exactly `- [ ]`** — not `- [x]`, not `* [ ]`. Downstream tools toggle these.
+- **Checkbox syntax is exactly `- [ ]`** — NOT `* [ ]`, NOT `- [x]`, not `* [x]`. Downstream agents (`executing-plans`) parse the literal `- [ ]` sequence; the asterisk form `* [ ]` is valid markdown but breaks their parser. Use a hyphen-minus, always.
+- **All list items use `-` (hyphen), not `*` (asterisk)** — for Files blocks AND checkboxes. Asterisk bullets fail downstream tooling.
 
 ## No Placeholders (Plan Failures)
 

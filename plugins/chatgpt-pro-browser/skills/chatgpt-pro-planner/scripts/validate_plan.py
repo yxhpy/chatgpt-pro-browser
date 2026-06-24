@@ -76,25 +76,35 @@ def validate(plan_text: str, strict: bool = False) -> tuple[bool, list[str], lis
 
     # 6. Each Task has a Files block and at least one checkbox step
     #    Split the plan into per-task chunks by `### Task N:`.
+    #    Accept BOTH `- [ ]` and `* [ ]` as checkbox markers (both are valid
+    #    markdown, though downstream tools expect `-`). We flag `* [ ]` as a
+    #    warning to normalize.
+    _CB = re.compile(r"^[*-] \[ \]", re.M)
     task_chunks = re.split(r"(?=^### Task \d+:)", plan_text, flags=re.M)
     task_chunks = [c for c in task_chunks if re.match(r"### Task \d+", c)]
+    star_boxes = len(re.findall(r"^\* \[ \]", plan_text, re.M))
+    if star_boxes:
+        warnings.append(
+            f"{star_boxes} checkbox(es) use `* [ ]` instead of `- [ ]` — "
+            f"normalize to hyphen so executing-plans can toggle them")
     for chunk in task_chunks:
         title_m = re.match(r"(### Task \d+[^\n]*)", chunk)
         title = title_m.group(1) if title_m else "Task"
         if "**Files:**" not in chunk:
             errors.append(f"{title}: missing '**Files:**' block")
-        if "- [ ]" not in chunk:
+        if not _CB.search(chunk):
             errors.append(f"{title}: no `- [ ]` checkbox steps")
 
-    # 7. At least one checkbox in the whole plan
-    total_boxes = plan_text.count("- [ ]")
+    # 7. At least one checkbox in the whole plan (either marker)
+    total_boxes = len(_CB.findall(plan_text))
     if total_boxes == 0:
-        errors.append("no `- [ ]` checkboxes anywhere — nothing to track")
+        errors.append("no `- [ ]` / `* [ ]` checkboxes anywhere — nothing to track")
 
     # 8. Placeholder scan on step lines
     placeholder_re = re.compile("|".join(FORBIDDEN), re.I)
+    _step_start = re.compile(r"^[*-] \[", re.M)
     for i, line in enumerate(lines, 1):
-        if line.strip().startswith("- ["):
+        if _step_start.match(line):
             m = placeholder_re.search(line)
             if m:
                 errors.append(
@@ -102,9 +112,8 @@ def validate(plan_text: str, strict: bool = False) -> tuple[bool, list[str], lis
                 )
 
     # 9. Verification steps should have Run:/Expected: (warning unless strict)
-    #    A step is a "verification-ish" step if it mentions run/test/pytest/verify.
     for i, line in enumerate(lines, 1):
-        if line.strip().startswith("- [") and re.search(r"\b(run|test|pytest|verify|build)\b", line, re.I):
+        if _step_start.match(line) and re.search(r"\b(run|test|pytest|verify|build)\b", line, re.I):
             # look at the next ~6 lines for Run: / Expected:
             window = "\n".join(lines[i:i+6])
             if "Run:" not in window:
@@ -137,7 +146,8 @@ def main() -> int:
     for e in errors:
         print(f"  [error] {e}", file=sys.stderr)
     task_count = len(re.findall(r"^### Task \d+", text, re.M))
-    print(f"  tasks: {task_count}  checkboxes: {text.count('- [ ]')}")
+    box_count = len(re.findall(r"^[*-] \[ \]", text, re.M))
+    print(f"  tasks: {task_count}  checkboxes: {box_count}")
     return 0 if passed else 1
 
 

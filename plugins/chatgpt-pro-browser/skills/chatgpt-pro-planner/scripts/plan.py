@@ -155,6 +155,11 @@ def save_plan(
     if body.startswith("```"):
         body = re.sub(r"^```(?:markdown|md)?\n", "", body)
         body = re.sub(r"\n```\s*$", "", body)
+    # Normalize checkbox + bullet markers: Pro often emits `* [ ]` / `* item`
+    # but downstream tools (executing-plans) require `- [ ]`. Convert asterisk
+    # bullets to hyphen at line start so the saved plan always parses.
+    body = re.sub(r"(?m)^\* (\[ \])", r"- \1", body)   # checkboxes
+    body = re.sub(r"(?m)^\* (?!\[)", r"- ", body)       # plain bullets (not checkboxes)
     p.write_text(body + "\n", encoding="utf-8")
     return p.resolve()
 
