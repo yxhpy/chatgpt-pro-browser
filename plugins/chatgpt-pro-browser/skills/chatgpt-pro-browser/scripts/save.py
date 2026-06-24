@@ -41,7 +41,7 @@ async def main() -> int:
                     help="output file path (default: stdout)")
     ap.add_argument("--no-pro", action="store_true")
     ap.add_argument("--headless", action="store_true", default=True)
-    ap.add_argument("--timeout", type=float, default=3600.0,
+    ap.add_argument("--timeout", type=float, default=600.0,
                     help="max seconds to wait (default 3600)")
     ap.add_argument("--poll", type=float, default=5.0,
                     help="poll interval (default 5s)")

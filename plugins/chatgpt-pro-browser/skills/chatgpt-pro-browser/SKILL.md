@@ -40,6 +40,38 @@ bash skills/chatgpt-pro-browser/scripts/prereq_check.sh
 
 The first time this skill reads cookies, macOS will pop a Keychain authorization dialog for "Chrome Safe Storage". The user must click **Allow** (or Always Allow). This is one-time.
 
+## Atomic CLI (the supported interface)
+
+Seven scripts in `scripts/`. These are the **only** supported entry points — everything else in the harness is private (`__all__` defines the public surface).
+
+| Script | Purpose |
+|---|---|
+| `daemon.py` | Start a persistent Chrome (CDP port 9223); stays alive for reuse |
+| `close.py` | Stop the daemon + clear lock |
+| `submit.py <prompt>` | Fire a task → print chat URL → exit (fire-and-forget) |
+| `status.py <url>` | One-shot peek: GENERATING / DONE / EMPTY |
+| `save.py <url> --out f` | Poll a chat to completion, save markdown |
+| `ask.py <prompt>` | Convenience: submit + wait + print (blocking) |
+| `chat.py` | Interactive REPL (auto-starts/ connects to daemon) |
+
+**Daemon reuse** is the key pattern: start `daemon.py` once, then `submit`/`status`/`save` connect to it (~3s/call) instead of cold-starting Chrome (~15s). Lock at `~/.chatgpt-pro-browser.lock`.
+
+## Downgrade protection (critical)
+
+ChatGPT Pro enforces **per-model usage allowances**. When exceeded, a banner appears ("You're out of messages with the Pro model. Responses will use a less powerful model until [reset]") and subsequent turns silently route to a weaker model.
+
+**The harness refuses to accept a downgraded answer.** It checks for the banner:
+- Before submitting (`ensure_pro`) → `DowngradeError`
+- Every ~15s during generation (`_wait_turn_done`) → aborts mid-task with `DowngradeError`
+
+Per the user directive: *只要 pro 页面不报错，还在进行中禁止降级* — if the page is fine and still generating, wait; if it shows a downgrade banner, fail loudly rather than return a fake Pro answer.
+
+## Timing
+
+- **Single-turn ceiling: 600s (10 min)** by default (`--timeout` / `timeout=` raises it). Short tasks finish in seconds; long tasks wait until done/stall.
+- **Internal poll: every 0.3–5s** (cheap innerText reads); heartbeat callback every ~30s for progress logging.
+- **Stall detection:** if generating but no text change for `stall_threshold` (5 min), treat as page hang and return partial + `completed=False` (resumable).
+
 ## The core driver: `lib/harness.py`
 
 This is the reusable module. Import `ChatGPTSession` and call `.ask()`.

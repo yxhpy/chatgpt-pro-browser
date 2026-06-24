@@ -34,6 +34,19 @@ from playwright.async_api import (
     async_playwright,
 )
 
+# Public API surface — only these are part of the supported interface. Everything
+# else (constants, helpers, private methods) is implementation detail and may
+# change. Downstream scripts/skills should import only from this set.
+__all__ = [
+    "ChatGPTSession",     # main async-context-manager driver
+    "TurnResult",         # return type of ask()/resume()
+    "DowngradeError",     # raised when Pro is unavailable (don't accept fallback)
+    "session",            # convenience context manager
+    "daemon_alive",       # is a persistent browser daemon running?
+    "read_lock",          # read daemon lock (for close.py / diagnostics)
+    "clear_lock",         # clear daemon lock (for close.py)
+]
+
 PROFILE = os.path.expanduser("~/Library/Application Support/Google/Chrome")
 COOKIES_DB = os.path.join(PROFILE, "Default", "Cookies")
 UA = (
@@ -53,6 +66,34 @@ PLACEHOLDERS = {
     "thinking…", "thinking...", "generating…", "generating...",
     "pro 思考中", "思考中", "正在思考…", "正在生成…", "",
 }
+
+# Downgrade detection: ChatGPT Pro enforces per-model usage allowances. When
+# exceeded, a banner appears: "You're out of messages with the Pro model.
+# Responses will use a DOWNGRADED_MODEL until [reset]." Subsequent turns then
+# silently use a weaker model. We MUST detect this and refuse to proceed —
+# the user asked for Pro and a fallback answer is a wrong answer. (Per the
+# user's directive: "只要 pro 页面不报错，还在进行中禁止降级".)
+DOWNGRADE_MARKERS = [
+    # English (2026 wording variants)
+    "out of messages with the pro model",
+    "responses will use a less powerful model",
+    "responses will use a smaller model",
+    "until your usage resets",
+    "temporarily limited", "temporarily unavailable",
+    "fall back to", "falling back to",
+    # Chinese
+    "pro 模型额度已用尽", "将使用较弱", "将使用更小的模型",
+    "已暂时受限", "暂时不可用", "降级",
+]
+
+
+class DowngradeError(RuntimeError):
+    """Raised when ChatGPT shows a downgrade banner — Pro is unavailable and the
+    page is silently routing to a weaker model. We refuse to proceed rather than
+    accept a downgraded answer."""
+    def __init__(self, message: str, reset_hint: str = ""):
+        self.reset_hint = reset_hint
+        super().__init__(message)
 
 
 # --------------------------------------------------------------------------- #
@@ -82,7 +123,7 @@ def _decrypt_v10(blob: bytes, key: bytes) -> str:
     return out[32:].decode("utf-8", "replace")
 
 
-def load_chatgpt_cookies() -> list[dict]:
+def _load_cookies() -> list[dict]:
     """Decrypt and return Playwright-format cookies for chatgpt.com / openai.com."""
     key = _chrome_key()
     con = sqlite3.connect(f"file:{COOKIES_DB}?mode=ro", uri=True)
@@ -133,7 +174,7 @@ class TurnResult:
 # --------------------------------------------------------------------------- #
 # Daemon / lock-file management
 # --------------------------------------------------------------------------- #
-def write_lock(cdp_url: str, pid: int) -> None:
+def _write_lock(cdp_url: str, pid: int) -> None:
     """Record the running daemon's CDP endpoint + pid so other scripts connect."""
     import json
     data = {"cdp_url": cdp_url, "pid": pid,
@@ -232,7 +273,7 @@ class ChatGPTSession:
     # ---- lifecycle ----
     async def __aenter__(self) -> "ChatGPTSession":
         self._pw = await async_playwright().start()
-        cookies = load_chatgpt_cookies()
+        cookies = _load_cookies()
         names = {c["name"] for c in cookies}
         if not {"__Secure-next-auth.session-token.0", "_puid"} <= names:
             raise RuntimeError(
@@ -293,7 +334,7 @@ class ChatGPTSession:
         # if daemon mode, record the lock so others can connect
         if self.connect_mode == "daemon":
             cdp_url = f"http://127.0.0.1:{DEFAULT_CDP_PORT}"
-            write_lock(cdp_url, os.getpid())
+            _write_lock(cdp_url, os.getpid())
         return self
 
     async def __aexit__(self, *exc):
@@ -339,6 +380,26 @@ class ChatGPTSession:
         clear_lock()
 
     # ---- auth ----
+    async def _detect_downgrade(self) -> Optional[str]:
+        """Scan the page for a downgrade banner. Returns the matched marker
+        text if Pro is currently unavailable (account routed to a weaker
+        model), else None. This is the guard against silently accepting
+        downgraded answers.
+
+        Downgrade banners appear as toast/dialog text in the page body when
+        the user's Pro model allowance is exhausted. We check body.innerText
+        for the documented marker phrases.
+        """
+        try:
+            body = await self._page.evaluate(
+                "() => (document.body && document.body.innerText) || ''")
+        except Exception:
+            return None
+        low = body.lower()
+        for marker in DOWNGRADE_MARKERS:
+            if marker in low:
+                return marker
+        return None
     async def current_plan(self) -> str:
         p = await self._page.evaluate(
             """async () => {
@@ -367,10 +428,9 @@ class ChatGPTSession:
                 await self._page.wait_for_selector(
                     'div.ProseMirror[contenteditable="true"]', timeout=15000
                 )
-                return
+                break
             except PWTimeout:
                 if attempt == 0:
-                    # might be a slow load — reload and retry once
                     try:
                         await self._page.reload(
                             wait_until="domcontentloaded", timeout=30000)
@@ -382,6 +442,17 @@ class ChatGPTSession:
                         "Login wall detected — session-token expired. "
                         "Re-login to chatgpt.com in Chrome, then retry."
                     )
+        # CRITICAL guard: if a downgrade banner is showing (Pro allowance
+        # exhausted → page silently routes to a weaker model), refuse to
+        # proceed. The user asked for Pro; a downgraded answer is wrong.
+        marker = await self._detect_downgrade()
+        if marker:
+            raise DowngradeError(
+                f"ChatGPT Pro is currently unavailable on this account — a "
+                f"downgrade banner was detected ('{marker}'). Responses would "
+                f"use a less powerful model. Wait for the usage window to "
+                f"reset, then retry. Do NOT proceed with a downgraded model.",
+            )
 
     # ---- composer ----
     async def _focus_composer(self) -> None:
@@ -507,7 +578,7 @@ class ChatGPTSession:
 
     # ---- completion detection ----
     async def _wait_turn_done(
-        self, timeout: float = 3600.0, *, poll_interval: float = 0.3,
+        self, timeout: float = 600.0, *, poll_interval: float = 0.3,
         heartbeat_interval: float = 30.0, stall_threshold: float = 300.0,
         on_heartbeat=None,
     ) -> tuple[str, bool]:
@@ -538,6 +609,7 @@ class ChatGPTSession:
         last_text, stable = "", 0
         last_change_at = time.monotonic()
         last_heartbeat_at = 0.0
+        last_downgrade_check_at = 0.0
         url_captured = False
         while time.monotonic() < deadline:
             snap = await self._page.evaluate(
@@ -559,6 +631,21 @@ class ChatGPTSession:
             # track last content change (for stall detection)
             if text != last_text:
                 last_change_at = now
+            # Downgrade guard (per user directive: 只要 pro 页面不报错，还在
+            # 进行中禁止降级). Check every ~15s while generating — cheap and
+            # catches a mid-generation banner without per-poll overhead.
+            if gen and (now - last_downgrade_check_at) >= 15.0:
+                last_downgrade_check_at = now
+                marker = await self._detect_downgrade()
+                if marker:
+                    # Pro got pulled mid-task — abort, do NOT return a downgraded
+                    # answer as if it were Pro.
+                    raise DowngradeError(
+                        f"Downgrade detected mid-generation ('{marker}'). Pro "
+                        f"became unavailable while this turn was running. The "
+                        f"partial text is NOT a Pro answer — discarded. Retry "
+                        f"after the usage window resets."
+                    )
             # heartbeat callback
             if on_heartbeat and (now - last_heartbeat_at) >= heartbeat_interval:
                 last_heartbeat_at = now
@@ -725,7 +812,7 @@ class ChatGPTSession:
 
     async def ask(
         self, prompt: str, *, attachments: Optional[list[str]] = None,
-        input_mode: str = "paste", type_delay: int = 6, timeout: float = 3600.0,
+        input_mode: str = "paste", type_delay: int = 6, timeout: float = 600.0,
         stall_threshold: float = 300.0, on_heartbeat=None,
     ) -> TurnResult:
         """Send `prompt` (with optional file attachments) and return the reply.
@@ -780,7 +867,7 @@ class ChatGPTSession:
         )
 
     async def resume(
-        self, chat_url: str, *, timeout: float = 3600.0, poll_interval: float = 3.0,
+        self, chat_url: str, *, timeout: float = 600.0, poll_interval: float = 3.0,
         stall_threshold: float = 300.0, heartbeat_interval: float = 30.0,
         on_heartbeat=None,
     ) -> TurnResult:

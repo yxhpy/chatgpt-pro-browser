@@ -244,7 +244,7 @@ def main() -> int:
     ap.add_argument("--no-refine", action="store_true", help="skip round-2 refinement")
     ap.add_argument("--no-pro", action="store_true", help="don't require Pro plan")
     ap.add_argument("--headless", action="store_true")
-    ap.add_argument("--timeout", type=float, default=300.0)
+    ap.add_argument("--timeout", type=float, default=600.0)
     ap.add_argument("--input-mode", choices=("paste", "keyboard", "clipboard"),
                     default="paste",
                     help="composer fill mode (default paste — safe for large "

@@ -30,7 +30,7 @@ async def main():
     ap.add_argument("--no-pro", action="store_true",
                     help="don't require the Pro plan (allow Plus/Free)")
     ap.add_argument("--headless", action="store_true", help="run headless")
-    ap.add_argument("--timeout", type=float, default=180,
+    ap.add_argument("--timeout", type=float, default=600.0,
                     help="max seconds to wait (default 180)")
     ap.add_argument("--new-chat", action="store_true", default=True,
                     help="start a fresh chat (default; isolated)")

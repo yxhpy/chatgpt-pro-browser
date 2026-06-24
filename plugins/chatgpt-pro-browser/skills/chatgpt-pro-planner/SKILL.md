@@ -74,7 +74,9 @@ python3 skills/chatgpt-pro-planner/scripts/plan.py bugfix \
     --context lib/harness.py
 ```
 
-Flags: `--out <path>` (default `docs/superpowers/plans/...`), `--no-refine` (skip round 2), `--headless`, `--timeout 300`.
+Flags: `--out <path>` (default `docs/superpowers/plans/...`), `--no-refine` (skip round 2), `--headless`, `--timeout 600`.
+
+**Templates are read live, not cached.** `plan.py` re-reads `references/<type>-template.md` and `references/output-contract.md` from disk on every invocation (`_read_ref()` opens the file fresh). So if you edit a template to tweak the prompt or output rules, the next `plan.py` call picks it up immediately — no reinstall, no restart. This applies to the installed codex plugin copy too (it reads from its own `references/`).
 
 ## Programmatic usage
 
