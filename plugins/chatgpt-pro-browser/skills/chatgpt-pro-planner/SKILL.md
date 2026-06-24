@@ -7,7 +7,14 @@ description: Generate executable engineering plans (dev / test / refactor / bugf
 
 Use **ChatGPT Pro (GPT-5.5 Pro)** to produce engineering plans that downstream agents (Codex, Claude Code, Gemini CLI) execute. The plan comes out in the **superpowers markdown format** — the exact format `executing-plans` and `subagent-driven-development` parse — so the handoff is seamless.
 
-This skill **depends on `chatgpt-pro-browser`** (the sibling skill in this plugin). It reuses that harness to call Pro.
+## Dependency contract (read this before editing)
+
+This skill **does NOT call Pro directly** and **does NOT import the browser harness**. The two skills are cleanly separated:
+
+- **chatgpt-pro-browser** = the SOLE entry to ChatGPT Pro. Owns browser lifecycle, cookie decryption, Cloudflare, Pro verification, downgrade guard, paste-mode input, the resume loop, daemon reuse. It exposes `ask.py` (and the other atomic CLIs) as its supported interface.
+- **chatgpt-pro-planner** (this skill) = pure planning knowledge only. It builds the prompt from its templates + `output-contract.md`, then hands the assembled text to `ask.py` via **subprocess** and treats the reply as opaque. It knows nothing about `ChatGPTSession`, paste mode, or how Pro is reached. The single point of contact is `_ask_via_browser_skill()` calling `skills/chatgpt-pro-browser/scripts/ask.py`.
+
+This means: editing a planner template never risks breaking the browser layer, and vice versa. Process-isolated, no shared Python state.
 
 ## When to use
 
@@ -23,12 +30,12 @@ The user's request maps to one of four plan types. If ambiguous, ask which type 
 ## How it works
 
 1. **Determine plan type** from the request: `dev`, `test`, `refactor`, or `bugfix`.
-2. **Gather context**: the goal (from the request) + optionally files (specs, source, README). If the user references files, upload them so Pro reads real content, not just the prompt.
-3. **Load the type template** from `references/<type>-template.md` and the format spec from `references/output-contract.md`.
+2. **Gather context**: the goal (from the request) + optionally files (specs, source, README). If the user references files, they're passed to `ask.py --file` so Pro reads real content, not just the prompt.
+3. **Load the type template** from `references/<type>-template.md` and the format spec from `references/output-contract.md` (both read fresh from disk every run — edits take effect immediately).
 4. **Build the prompt**: the template's role/instructions prefix + `<OUTPUT_CONTRACT>` (the full output-contract.md content) + the user's goal + context summary.
-5. **Call Pro** via `lib/harness.py`'s `ChatGPTSession.ask()`. The harness has no `system` role, so the role instructions are prepended to the user prompt (proven effective — Pro follows embedded role instructions well).
-6. **Refine (multi-round)**: in the SAME chat, send the type template's "Refinement cue" (turn 2). Pro self-reviews against the output contract and returns a corrected plan. This catches placeholders and type inconsistencies that slip into round 1.
-7. **Save** the final plan to `docs/superpowers/plans/YYYY-MM-DD-<feature>-<type>.md`.
+5. **Send to Pro via the browser skill**: `plan.py` calls `skills/chatgpt-pro-browser/scripts/ask.py` as a **subprocess** with the assembled prompt. The browser skill handles everything Pro-related (browser, Cloudflare, Pro check, downgrade guard, paste input, resume loop, heartbeat). The planner just receives the reply text. The role instructions are embedded in the prompt prefix (Pro follows embedded role instructions well).
+6. **Refine (multi-round)**: a second `ask.py` call with the type template's "Refinement cue". Pro self-reviews against the output contract and returns a corrected plan. This catches placeholders and type inconsistencies that slip into round 1.
+7. **Save** the final plan to `docs/superpowers/plans/YYYY-MM-DD-<feature>-<type>.md` (normalize `* [ ]` → `- [ ]` on write).
 8. **Validate** with `scripts/validate_plan.py` — a hard format check. If it fails, run another refinement round.
 9. **Hand off**: tell the user the two execution paths (subagent-driven-development / executing-plans), exactly like `writing-plans` does.
 
@@ -80,27 +87,22 @@ Flags: `--out <path>` (default `docs/superpowers/plans/...`), `--no-refine` (ski
 
 ## Programmatic usage
 
+The planner is a pure prompt-builder + a thin subprocess wrapper. It never
+imports the browser harness. To drive it programmatically:
+
 ```python
-import asyncio, sys, os
-REPO = "<repo root>"
-sys.path.insert(0, os.path.join(REPO, "lib"))
-sys.path.insert(0, os.path.join(REPO, "skills", "chatgpt-pro-planner", "scripts"))
-from harness import ChatGPTSession
-from plan import build_prompt, save_plan   # helpers in scripts/plan.py
+import asyncio, sys
+REPO = "<plugin root>"  # .../plugins/chatgpt-pro-browser
+sys.path.insert(0, f"{REPO}/skills/chatgpt-pro-planner/scripts")
+from plan import build_prompt, build_refinement_cue, save_plan, generate
 
-async def main():
-    async with ChatGPTSession(headless=False) as s:
-        await s.ensure_pro()
-        await s.new_chat()
-        prompt = build_prompt("dev", "my goal", context_files=["lib/harness.py"],
-                              repo_root=REPO)
-        r = await s.ask(prompt, timeout=300)
-        # refine
-        r2 = await s.ask(build_refinement_cue("dev", repo_root=REPO), timeout=300)
-        path = save_plan(r2.text, "my-goal", "dev", repo_root=REPO)
-        print(f"saved → {path}")
+# Option A — full pipeline (calls the browser skill's ask.py under the hood):
+asyncio.run(generate("dev", "my goal", context_files=["README.md"]))
 
-asyncio.run(main())
+# Option B — just build the prompt (no Pro call; send it however you like):
+prompt = build_prompt("dev", "my goal", context_files=["README.md"])
+cue = build_refinement_cue("dev")
+# hand `prompt` to chatgpt-pro-browser/scripts/ask.py yourself
 ```
 
 ## Why Pro for planning
